@@ -9,6 +9,7 @@ from typing import Optional, TYPE_CHECKING, Tuple
 
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     filters,
@@ -42,6 +43,9 @@ class TelegramBot:
         self.config = config
         self.config_path = "config.json"
         self.account_manager: Optional["AccountManager"] = None
+        # Многошаговый ввод из инлайн-меню:
+        # user_id -> {"op": "addstreamer"|"settoken", "i": worker_idx}
+        self.pending: dict[int, dict] = {}
 
         # Обратная совместимость
         self._legacy_streamers: list[str] = []
@@ -107,6 +111,9 @@ class TelegramBot:
                 CommandHandler("stats", self.cmd_stats),
                 CommandHandler("move", self.cmd_move),
                 CommandHandler("logs", self.cmd_logs),
+                CommandHandler("menu", self.cmd_menu),
+                CommandHandler("cancel", self.cmd_cancel),
+                CallbackQueryHandler(self.on_callback),
                 CommandHandler("restart", self.cmd_restart),
                 CommandHandler("help", self.cmd_help),
                 CommandHandler("language", self.cmd_language),
@@ -184,8 +191,9 @@ class TelegramBot:
         btn_bal = d.get("btn_balance", "💰 Balance")
         btn_help = d.get("btn_help", "❓ Help")
         btn_acc = d.get("btn_accounts", "👥 Accounts")
+        btn_menu = d.get("btn_menu", "🎛 Menu")
 
-        keyboard = [[btn_stat, btn_bal], [btn_acc]]
+        keyboard = [[btn_stat, btn_bal], [btn_acc, btn_menu]]
 
         if is_admin:
             btn_restart = d.get("btn_restart", "🔄 Restart")
@@ -587,11 +595,7 @@ class TelegramBot:
             parse_mode=ParseMode.HTML,
         )
 
-    async def cmd_errors(self, update: Update, context):
-        uid = update.effective_user.id
-        if not self.is_user_allowed(uid) or not self.account_manager:
-            return
-        lang = self._lang(uid)
+    def _build_errors_text(self, lang: str) -> str:
         lines = []
         for worker in self.account_manager.workers:
             st = worker.get_status()
@@ -614,12 +618,18 @@ class TelegramBot:
                         f"{html.escape(info['last_error'][:150])}"
                         f"</code>"
                     )
-        text = (
+        return (
             "\n".join(lines)
             if lines else self.get_text("no_errors", lang)
         )
+
+    async def cmd_errors(self, update: Update, context):
+        uid = update.effective_user.id
+        if not self.is_user_allowed(uid) or not self.account_manager:
+            return
         await update.message.reply_text(
-            text, parse_mode=ParseMode.HTML
+            self._build_errors_text(self._lang(uid)),
+            parse_mode=ParseMode.HTML,
         )
 
     async def cmd_addstreamer(self, update: Update, context):
@@ -884,20 +894,24 @@ class TelegramBot:
             text, parse_mode=ParseMode.HTML
         )
 
-    async def cmd_checktokens(self, update: Update, context):
-        guard = await self._admin_guard(update)
-        if not guard:
-            return
-        _, lang = guard
-        wait_msg = await update.message.reply_text(
-            self.get_text("token_checking", lang),
-            parse_mode=ParseMode.HTML,
-        )
-        lines = [f"<b>{html.escape(self.get_text('tokens_title', lang))}</b>\n"]
+    async def run_tokens_check(self) -> list:
+        """Проверить токены всех воркеров.
+
+        Возвращает [(worker, valid, info), ...].
+        """
+        results = []
         for worker in self.account_manager.workers:
             valid, info = await asyncio.to_thread(
                 self._validate_kick_token, worker.token
             )
+            results.append((worker, valid, info))
+        return results
+
+    def _format_tokens_report(self, lang: str, results: list) -> str:
+        lines = [
+            f"<b>{html.escape(self.get_text('tokens_title', lang))}</b>\n"
+        ]
+        for worker, valid, info in results:
             if valid:
                 mark = self.get_text("token_check_ok", lang)
             elif info == "invalid":
@@ -912,7 +926,19 @@ class TelegramBot:
                 f"<code>{self._mask_token(worker.token)}</code>\n"
                 f"   └ {mark}"
             )
-        text = "\n".join(lines)
+        return "\n".join(lines)
+
+    async def cmd_checktokens(self, update: Update, context):
+        guard = await self._admin_guard(update)
+        if not guard:
+            return
+        _, lang = guard
+        wait_msg = await update.message.reply_text(
+            self.get_text("token_checking", lang),
+            parse_mode=ParseMode.HTML,
+        )
+        results = await self.run_tokens_check()
+        text = self._format_tokens_report(lang, results)
         try:
             await wait_msg.edit_text(
                 text, parse_mode=ParseMode.HTML
@@ -922,26 +948,10 @@ class TelegramBot:
                 text, parse_mode=ParseMode.HTML
             )
 
-    async def cmd_stats(self, update: Update, context):
-        uid = update.effective_user.id
-        if not self.is_user_allowed(uid) or not self.account_manager:
-            return
-        lang = self._lang(uid)
-        hours = 24
-        if context.args:
-            try:
-                hours = max(1, min(int(context.args[0]), 720))
-            except ValueError:
-                pass
-        gains = await asyncio.to_thread(
-            self.account_manager.get_gains, hours
-        )
+    def _build_stats_text(self, lang: str, hours: int,
+                            gains: dict) -> str:
         if not gains or not any(gains.values()):
-            await update.message.reply_text(
-                self.get_text("stats_empty", lang, hours=hours),
-                parse_mode=ParseMode.HTML,
-            )
-            return
+            return self.get_text("stats_empty", lang, hours=hours)
         lines = [self.get_text(
             "stats_title", lang, hours=hours
         ) + "\n"]
@@ -966,8 +976,25 @@ class TelegramBot:
         lines.append(self.get_text(
             "stats_total", lang, total=grand
         ))
+        return "\n".join(lines)
+
+    async def cmd_stats(self, update: Update, context):
+        uid = update.effective_user.id
+        if not self.is_user_allowed(uid) or not self.account_manager:
+            return
+        lang = self._lang(uid)
+        hours = 24
+        if context.args:
+            try:
+                hours = max(1, min(int(context.args[0]), 720))
+            except ValueError:
+                pass
+        gains = await asyncio.to_thread(
+            self.account_manager.get_gains, hours
+        )
         await update.message.reply_text(
-            "\n".join(lines), parse_mode=ParseMode.HTML
+            self._build_stats_text(lang, hours, gains),
+            parse_mode=ParseMode.HTML,
         )
 
     async def cmd_move(self, update: Update, context):
@@ -1022,6 +1049,26 @@ class TelegramBot:
             text, parse_mode=ParseMode.HTML
         )
 
+    def _read_log_tail(self, lang: str, n: int) -> str:
+        log_path = self.config.get("Log_file", "miner.log")
+        if not log_path:
+            return self.get_text("logs_disabled", lang)
+        try:
+            with open(log_path, "r", encoding="utf-8",
+                      errors="ignore") as f:
+                lines = f.readlines()[-n:]
+        except FileNotFoundError:
+            return self.get_text("logs_empty", lang)
+        except Exception as e:
+            return html.escape(str(e))
+        if not lines:
+            return self.get_text("logs_empty", lang)
+        body = html.escape("".join(lines).strip())
+        text = f"<pre>{body}</pre>"
+        if len(text) > 4000:
+            text = f"<pre>{body[-3800:]}</pre>"
+        return text
+
     async def cmd_logs(self, update: Update, context):
         uid = update.effective_user.id
         if not self.is_user_allowed(uid):
@@ -1033,41 +1080,50 @@ class TelegramBot:
                 n = max(5, min(int(context.args[0]), 100))
             except ValueError:
                 pass
-        log_path = self.config.get("Log_file", "miner.log")
-        if not log_path:
-            await update.message.reply_text(
-                self.get_text("logs_disabled", lang),
-                parse_mode=ParseMode.HTML,
-            )
-            return
-        try:
-            with open(log_path, "r", encoding="utf-8",
-                      errors="ignore") as f:
-                lines = f.readlines()[-n:]
-        except FileNotFoundError:
-            await update.message.reply_text(
-                self.get_text("logs_empty", lang),
-                parse_mode=ParseMode.HTML,
-            )
-            return
-        except Exception as e:
-            await update.message.reply_text(
-                html.escape(str(e)), parse_mode=ParseMode.HTML
-            )
-            return
-        if not lines:
-            await update.message.reply_text(
-                self.get_text("logs_empty", lang),
-                parse_mode=ParseMode.HTML,
-            )
-            return
-        body = html.escape("".join(lines).strip())
-        text = f"<pre>{body}</pre>"
-        if len(text) > 4000:
-            text = f"<pre>{body[-3800:]}</pre>"
         await update.message.reply_text(
-            text, parse_mode=ParseMode.HTML
+            self._read_log_tail(lang, n),
+            parse_mode=ParseMode.HTML,
         )
+
+    def worker_by_index(self, idx: int):
+        if not self.account_manager:
+            return None
+        workers = self.account_manager.workers
+        if 0 <= idx < len(workers):
+            return workers[idx]
+        return None
+
+    async def cmd_menu(self, update: Update, context):
+        uid = update.effective_user.id
+        if not self.is_user_allowed(uid) or not self.account_manager:
+            return
+        from tg_bot.menu import main_menu
+        lang = self._lang(uid)
+        text, markup = main_menu(self, lang, self.is_admin(uid))
+        await update.message.reply_text(
+            text, reply_markup=markup, parse_mode=ParseMode.HTML
+        )
+
+    async def cmd_cancel(self, update: Update, context):
+        uid = update.effective_user.id
+        if not self.is_user_allowed(uid):
+            return
+        lang = self._lang(uid)
+        if uid in self.pending:
+            del self.pending[uid]
+            await update.message.reply_text(
+                self.get_text("menu_cancelled", lang),
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await update.message.reply_text(
+                self.get_text("menu_nothing_to_cancel", lang),
+                parse_mode=ParseMode.HTML,
+            )
+
+    async def on_callback(self, update: Update, context):
+        from tg_bot.menu import on_callback
+        await on_callback(self, update, context)
 
     async def cmd_restart(self, update: Update, context):
         uid = update.effective_user.id
@@ -1149,12 +1205,18 @@ class TelegramBot:
         d = self.language_files.get(
             lang, self.language_files.get("en", {})
         )
+        # Многошаговый ввод из инлайн-меню — в приоритете
+        if uid in self.pending:
+            from tg_bot.menu import handle_pending_text
+            await handle_pending_text(self, update, context)
+            return
         btn_map = {
             d.get("btn_status", "📊 Status"): self.cmd_status,
             d.get("btn_balance", "💰 Balance"): self.cmd_balance,
             d.get("btn_help", "❓ Help"): self.cmd_help,
             d.get("btn_restart", "🔄 Restart"): self.cmd_restart,
             d.get("btn_accounts", "👥 Accounts"): self.cmd_accounts,
+            d.get("btn_menu", "🎛 Menu"): self.cmd_menu,
         }
         handler = btn_map.get(text)
         if handler:
