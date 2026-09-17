@@ -9,9 +9,13 @@ services:
 
     container_name: kick-miner
     restart: unless-stopped
+    stop_grace_period: 30s
 
     volumes:
       - ${CONFIG_FILE:-./config.json}:/app/config.json:ro
+      # Папка для логов/статистики: укажите в config.json
+      # "Log_file": "data/miner.log", "Stats_db": "data/miner_stats.db"
+      - ./data:/app/data
 
     ports:
       - "5000:5000"

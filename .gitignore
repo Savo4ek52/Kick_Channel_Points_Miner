@@ -20,6 +20,7 @@ config.json
 # 🔹 Logs & Databases
 *.log
 logs/
+data/
 debug.log
 *.sqlite
 *.db

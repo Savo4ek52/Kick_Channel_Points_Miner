@@ -1,6 +1,10 @@
 {
   "Language": "en",
   "Debug": false,
+  "Log_file": "miner.log",
+  "Log_retention_days": 7,
+  "Stats_db": "miner_stats.db",
+  "Token_check_hours": 6,
 
   "WebDashboard": {
     "enabled": true,

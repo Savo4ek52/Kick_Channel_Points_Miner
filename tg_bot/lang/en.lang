@@ -48,6 +48,13 @@
   "resumed": "▶️ Account <b>{alias}</b> resumed.\n💾 Config saved.",
   "tokens_title": "🔑 Token check",
   "cfg_save_failed": "⚠️ Live-applied, but config.json was NOT saved: {error}",
-  "help_full": "📚 <b>Commands:</b>\n\n/start - Main menu\n/status - Miner status\n/balance - Points balances\n/accounts - Accounts overview\n/account &lt;alias|number&gt; - Account details\n/errors - Recent streamer errors\n/help - This help",
-  "help_full_admin": "📚 <b>Commands:</b>\n\n/start - Main menu\n/status - Miner status\n/balance - Points balances\n/accounts - Accounts overview\n/account &lt;alias|number&gt; - Account details\n/errors - Recent streamer errors\n\n<b>Admin — account management:</b>\n/addstreamer &lt;alias&gt; &lt;name&gt;\n/delstreamer &lt;alias&gt; &lt;name&gt;\n/setlimit &lt;alias&gt; &lt;1-10&gt;\n/settoken &lt;alias&gt; &lt;token_without_Bearer&gt;\n/pause &lt;alias&gt; / /resume &lt;alias&gt;\n/checktokens - Validate all tokens\n/restart - Restart miner\n/language [en/ru]"
+  "help_full": "📚 <b>Commands:</b>\n\n/start - Main menu\n/status - Miner status\n/balance - Points balances\n/accounts - Accounts overview\n/account &lt;alias|number&gt; - Account details\n/stats [hours] - Points gains\n/errors - Recent streamer errors\n/logs [N] - Last log lines\n/help - This help",
+  "help_full_admin": "📚 <b>Commands:</b>\n\n/start - Main menu\n/status - Miner status\n/balance - Points balances\n/accounts - Accounts overview\n/account &lt;alias|number&gt; - Account details\n/stats [hours] - Points gains\n/errors - Recent streamer errors\n/logs [N] - Last log lines\n\n<b>Admin — account management:</b>\n/addstreamer &lt;alias&gt; &lt;name&gt;\n/delstreamer &lt;alias&gt; &lt;name&gt;\n/move &lt;alias&gt; &lt;name&gt; &lt;position&gt;\n/setlimit &lt;alias&gt; &lt;1-10&gt;\n/settoken &lt;alias&gt; &lt;token_without_Bearer&gt;\n/pause &lt;alias&gt; / /resume &lt;alias&gt;\n/checktokens - Validate all tokens\n/restart - Restart miner\n/language [en/ru]",
+  "stats_title": "📈 <b>Gains over {hours}h</b>",
+  "stats_empty": "📈 No data for the last {hours}h yet — stats accumulate while farming.",
+  "stats_total": "🏆 <b>Total: +{total}</b>",
+  "moved": "✅ <code>{streamer}</code> in <b>{alias}</b> moved to position #{pos}.\n💾 Config saved.",
+  "logs_disabled": "ℹ️ File logging is off (Log_file is empty in config.json).",
+  "logs_empty": "ℹ️ Log file is empty or not found yet.",
+  "token_alert": "🔑 <b>Token dead!</b>\n\nBearer token of <b>{alias}</b> is no longer valid — farming on it has stopped.\nPaste a fresh one: <code>/settoken {alias} new_token</code>"
 }

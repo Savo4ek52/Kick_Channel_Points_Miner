@@ -31,4 +31,7 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 5000
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/healthz', timeout=4)" || python -c "import glob; cmds=[open(f).read() for f in glob.glob('/proc/[0-9]*/cmdline')]; raise SystemExit(0 if any('main.py' in c for c in cmds) else 1)"
+
 CMD ["python", "main.py"]

@@ -1,0 +1,18 @@
+[Unit]
+Description=Kick Channel Points Miner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# ПОМЕНЯЙТЕ пути под себя:
+User=miner
+WorkingDirectory=/opt/kickminer
+ExecStart=/opt/kickminer/.venv/bin/python /opt/kickminer/main.py
+Restart=on-failure
+RestartSec=10
+# дать майнеру 25с на graceful shutdown (SIGTERM -> чистый выход)
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

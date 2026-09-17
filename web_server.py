@@ -501,6 +501,7 @@ function renderAccounts(data) {
         const limit = acc.max_concurrent || 0;
         const streamers = acc.streamers || {};
         const order = acc.streamer_order || Object.keys(streamers);
+        const gains = (data.gains_24h || {})[alias] || {};
 
         let accTotal = 0;
         let accWatching = 0;
@@ -534,6 +535,10 @@ function renderAccounts(data) {
 
             const lastUp = fmtTime(info.last_update);
             const pri = info.priority !== undefined ? info.priority : "?";
+            const gain = gains[name] || 0;
+            const gainHtml = gain > 0
+                ? ' <span style="color:var(--kick-green);font-size:12px;font-weight:700;">+' + fmtNumber(gain) + '</span>'
+                : "";
 
             cards += '<div class="streamer-card ' + cardClass + '">' +
                 '<div class="card-row-top">' +
@@ -548,7 +553,7 @@ function renderAccounts(data) {
                     '</a>' +
                 '</div>' +
                 '<div class="card-row-bottom">' +
-                    '<span class="s-points">' + fmtNumber(pts) + ' pts</span>' +
+                    '<span class="s-points">' + fmtNumber(pts) + ' pts' + gainHtml + '</span>' +
                     '<div>' +
                         '<span class="s-status-label ' + cardClass + '">' + statusText + '</span>' +
                         ' <span class="s-time">' + lastUp + '</span>' +
@@ -563,10 +568,14 @@ function renderAccounts(data) {
 
         const proxyHtml = proxy ? "🔒 Proxy" : "🌐 Direct";
 
+        const pausedBadge = acc.paused
+            ? ' <span class="status-badge status-init">PAUSED</span>'
+            : "";
+
         html += '<div class="account-section">' +
             '<div class="account-header">' +
                 '<div class="account-name">' +
-                    '<span class="alias">' + alias + '</span>' +
+                    '<span class="alias">' + alias + '</span>' + pausedBadge +
                 '</div>' +
                 '<div class="account-meta">' +
                     '<span class="meta-item">' + proxyHtml + '</span>' +
@@ -660,6 +669,24 @@ setInterval(refresh, 5000);
 """
 
 
+@app.route('/healthz')
+def healthz():
+    """Проба живости для Docker/systemd-мониторинга."""
+    global _account_manager
+    if _account_manager is None:
+        return jsonify({"status": "starting"}), 200
+    try:
+        accounts = _account_manager.get_all_status()
+        watching = sum(a.get("active_count", 0) for a in accounts)
+        return jsonify({
+            "status": "ok",
+            "accounts": len(accounts),
+            "watching": watching,
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
 @app.route('/')
 def dashboard():
     return render_template_string(HTML_TEMPLATE)
@@ -694,6 +721,11 @@ def get_data():
                     else:
                         flat_stream_status[name] = "offline"
 
+            try:
+                gains_24h = _account_manager.get_gains(24)
+            except Exception:
+                gains_24h = {}
+
             return jsonify({
                 "streamers": flat_streamers,
                 "points": flat_points,
@@ -701,6 +733,7 @@ def get_data():
                 "status": "Active",
                 "stream_status": flat_stream_status,
                 "accounts": accounts_status,
+                "gains_24h": gains_24h,
             })
 
         except Exception as e:

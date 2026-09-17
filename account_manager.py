@@ -1,5 +1,6 @@
 import asyncio
 import random
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, TYPE_CHECKING
 from dataclasses import dataclass, field
@@ -9,9 +10,12 @@ from _websockets.ws_token import KickPoints
 from _websockets.ws_connect import KickWebSocket
 from utils.kick_utility import KickUtility
 from utils.get_points_amount import PointsAmount
+from utils.token_check import validate_kick_token
+from stats_db import StatsDB
 
 if TYPE_CHECKING:
     from discord_webhook import DiscordWebhook
+    from tg_bot.bot import TelegramBot
 
 
 @dataclass
@@ -32,6 +36,7 @@ class StreamerState:
 
     last_error: Optional[str] = None
     error_count: int = 0
+    cooldown_until: float = 0.0
 
 
 @dataclass
@@ -61,7 +66,9 @@ class AccountWorker:
         reconnect_cooldown: int = 600,
         stagger_min: float = 3.0,
         stagger_max: float = 8.0,
+        stats_db: Optional[StatsDB] = None,
     ):
+        self._stats_db = stats_db
         self.alias = account_cfg["alias"]
         self.token = self._clean_token(account_cfg.get("token", ""))
         self.paused = bool(account_cfg.get("disabled", False))
@@ -263,11 +270,19 @@ class AccountWorker:
                     )
 
             to_start = desired - current
+            now = time.time()
             for name in to_start:
-                pri = self.state.streamers[name].priority
+                st = self.state.streamers[name]
+                if now < st.cooldown_until:
+                    wait = int(st.cooldown_until - now)
+                    logger.debug(
+                        f"[{self.alias}] ⏳ {name} в кулдауне "
+                        f"ещё {wait}с — пропуск"
+                    )
+                    continue
                 logger.info(
                     f"[{self.alias}] ▶ {name} "
-                    f"(приоритет={pri})"
+                    f"(приоритет={st.priority})"
                 )
                 await self._start_streamer(name)
 
@@ -317,9 +332,13 @@ class AccountWorker:
 
             async def on_disconnect():
                 st.is_watching = False
+                st.cooldown_until = (
+                    time.time() + self.reconnect_cooldown
+                )
                 logger.warning(
                     f"[{self.alias}] WS {name} "
-                    f"окончательно отключился"
+                    f"окончательно отключился — "
+                    f"повтор через {self.reconnect_cooldown}с"
                 )
 
             ws_client = KickWebSocket(
@@ -350,6 +369,7 @@ class AccountWorker:
                 if pts is not None:
                     st.points = pts
                     st.last_points_update = datetime.now()
+                    self._record_stats(name, pts, watching=True)
             except Exception:
                 pass
 
@@ -422,6 +442,7 @@ class AccountWorker:
                 old = st.points
                 st.points = amount
                 st.last_points_update = datetime.now()
+                self._record_stats(name, amount, watching=True)
 
                 if amount > old:
                     gain = amount - old
@@ -543,6 +564,34 @@ class AccountWorker:
         logger.info(f"[{self.alias}] 🔑 Токен обновлён")
         return self.token
 
+    def _record_stats(self, name: str, points: int,
+                      watching: bool = False):
+        if self._stats_db is None:
+            return
+        try:
+            self._stats_db.record(
+                self.alias, name, points, watching=watching
+            )
+        except Exception:
+            pass
+
+    async def move_streamer(self, name: str, pos: int) -> str:
+        """Переставить стримера на позицию pos (0-based внутри).
+
+        Возвращает 'moved' | 'missing'.
+        """
+        name = (name or "").strip().lstrip("@")
+        if name not in self.state.streamers:
+            return "missing"
+        order = [s for s in self.state.streamer_order if s != name]
+        pos = max(0, min(int(pos), len(order)))
+        order.insert(pos, name)
+        self.state.streamer_order = order
+        for i, s in enumerate(order):
+            self.state.streamers[s].priority = i
+        await self._rebalance()
+        return "moved"
+
     async def stop(self):
         self._running = False
 
@@ -587,6 +636,9 @@ class AccountWorker:
                     "stream_id": s.stream_id,
                     "errors": s.error_count,
                     "last_error": s.last_error or "",
+                    "cooldown_s": max(
+                        0, int(s.cooldown_until - time.time())
+                    ),
                 }
                 for name, s in self.state.streamers.items()
             },
@@ -598,6 +650,16 @@ class AccountManager:
         self.workers: List[AccountWorker] = []
         self._tasks: List[asyncio.Task] = []
         self._discord: Optional["DiscordWebhook"] = None
+        self._tg: Optional["TelegramBot"] = None
+        self._token_bad: set = set()
+
+        stats_path = config.get("Stats_db", "miner_stats.db")
+        try:
+            self.stats_db: Optional[StatsDB] = StatsDB(stats_path)
+            logger.info(f"📊 Статистика поинтов: {stats_path}")
+        except Exception as e:
+            logger.warning(f"📊 StatsDB недоступна: {e}")
+            self.stats_db = None
 
         proxy_cfg = config.get("Proxy", {})
         global_proxy = (
@@ -641,6 +703,7 @@ class AccountManager:
                     reconnect_cooldown=reconnect_cooldown,
                     stagger_min=stagger_min,
                     stagger_max=stagger_max,
+                    stats_db=self.stats_db,
                 )
             )
 
@@ -659,6 +722,74 @@ class AccountManager:
             f"🟣 Discord webhook подключён к "
             f"{len(self.workers)} аккаунтам"
         )
+
+    def set_telegram(self, bot: "TelegramBot"):
+        """Подключить Telegram-бота для алертов сторожа токенов"""
+        self._tg = bot
+
+    def get_gains(self, hours: int = 24) -> Dict[str, Dict[str, int]]:
+        if self.stats_db is None:
+            return {}
+        try:
+            return self.stats_db.gains(hours)
+        except Exception:
+            return {}
+
+    async def token_watchdog(self, interval_hours: float = 6):
+        """Фоновый сторож: периодически проверяет Bearer-токены.
+
+        При смерти токена — лог + Discord + Telegram (один раз,
+        повторный алерт только после 'воскрешения' токена).
+        """
+        if interval_hours <= 0:
+            return
+        logger.info(
+            f"🔑 Сторож токенов: проверка каждые {interval_hours}ч"
+        )
+        await self._check_tokens_once()
+        while True:
+            await asyncio.sleep(interval_hours * 3600)
+            await self._check_tokens_once()
+
+    async def _check_tokens_once(self):
+        for worker in self.workers:
+            try:
+                valid, info = await asyncio.to_thread(
+                    validate_kick_token, worker.token,
+                    worker.proxy,
+                )
+            except Exception as e:
+                logger.debug(f"🔑 Watchdog {worker.alias}: {e}")
+                continue
+            if valid:
+                if worker.alias in self._token_bad:
+                    self._token_bad.discard(worker.alias)
+                    logger.success(
+                        f"🔑 [{worker.alias}] токен снова валиден"
+                    )
+                continue
+            if info != "invalid":
+                logger.debug(
+                    f"🔑 [{worker.alias}] проверка не удалась: {info}"
+                )
+                continue
+            if worker.alias in self._token_bad:
+                continue
+            self._token_bad.add(worker.alias)
+            logger.error(
+                f"🔑 [{worker.alias}] ТОКЕН НЕВАЛИДЕН — фарм "
+                f"остановится. Замените через /settoken"
+            )
+            if self._discord:
+                try:
+                    self._discord.send_token_alert(worker.alias)
+                except Exception:
+                    pass
+            if self._tg is not None:
+                try:
+                    await self._tg.send_token_alert(worker.alias)
+                except Exception:
+                    pass
 
     async def start_all(self):
         for i, worker in enumerate(self.workers):
@@ -682,6 +813,9 @@ class AccountManager:
             task.cancel()
         for w in self.workers:
             await w.stop()
+        if self.stats_db is not None:
+            self.stats_db.close()
+            self.stats_db = None
 
     def find_worker(self, ident: str) -> Optional[AccountWorker]:
         """Найти воркер по alias (без учёта регистра) или номеру с 1."""

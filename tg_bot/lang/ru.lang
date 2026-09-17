@@ -48,6 +48,13 @@
   "resumed": "▶️ Аккаунт <b>{alias}</b> снят с паузы.\n💾 Конфиг сохранён.",
   "tokens_title": "🔑 Проверка токенов",
   "cfg_save_failed": "⚠️ Применено на лету, но config.json НЕ сохранён: {error}",
-  "help_full": "📚 <b>Команды:</b>\n\n/start - Главное меню\n/status - Статус майнера\n/balance - Балансы поинтов\n/accounts - Обзор аккаунтов\n/account &lt;alias|номер&gt; - Карточка аккаунта\n/errors - Последние ошибки стримеров\n/help - Эта помощь",
-  "help_full_admin": "📚 <b>Команды:</b>\n\n/start - Главное меню\n/status - Статус майнера\n/balance - Балансы поинтов\n/accounts - Обзор аккаунтов\n/account &lt;alias|номер&gt; - Карточка аккаунта\n/errors - Последние ошибки стримеров\n\n<b>Админ — управление аккаунтами:</b>\n/addstreamer &lt;alias&gt; &lt;ник&gt;\n/delstreamer &lt;alias&gt; &lt;ник&gt;\n/setlimit &lt;alias&gt; &lt;1-10&gt;\n/settoken &lt;alias&gt; &lt;токен_без_Bearer&gt;\n/pause &lt;alias&gt; / /resume &lt;alias&gt;\n/checktokens - Проверить все токены\n/restart - Перезапуск майнера\n/language [en/ru]"
+  "help_full": "📚 <b>Команды:</b>\n\n/start - Главное меню\n/status - Статус майнера\n/balance - Балансы поинтов\n/accounts - Обзор аккаунтов\n/account &lt;alias|номер&gt; - Карточка аккаунта\n/stats [часов] - Прирост поинтов\n/errors - Последние ошибки стримеров\n/logs [N] - Последние строки лога\n/help - Эта помощь",
+  "help_full_admin": "📚 <b>Команды:</b>\n\n/start - Главное меню\n/status - Статус майнера\n/balance - Балансы поинтов\n/accounts - Обзор аккаунтов\n/account &lt;alias|номер&gt; - Карточка аккаунта\n/stats [часов] - Прирост поинтов\n/errors - Последние ошибки стримеров\n/logs [N] - Последние строки лога\n\n<b>Админ — управление аккаунтами:</b>\n/addstreamer &lt;alias&gt; &lt;ник&gt;\n/delstreamer &lt;alias&gt; &lt;ник&gt;\n/move &lt;alias&gt; &lt;ник&gt; &lt;позиция&gt;\n/setlimit &lt;alias&gt; &lt;1-10&gt;\n/settoken &lt;alias&gt; &lt;токен_без_Bearer&gt;\n/pause &lt;alias&gt; / /resume &lt;alias&gt;\n/checktokens - Проверить все токены\n/restart - Перезапуск майнера\n/language [en/ru]",
+  "stats_title": "📈 <b>Прирост за {hours}ч</b>",
+  "stats_empty": "📈 За последние {hours}ч данных пока нет — статистика копится по мере фарма.",
+  "stats_total": "🏆 <b>Итого: +{total}</b>",
+  "moved": "✅ <code>{streamer}</code> в <b>{alias}</b> перемещён на позицию #{pos}.\n💾 Конфиг сохранён.",
+  "logs_disabled": "ℹ️ Файловый лог выключен (Log_file пуст в config.json).",
+  "logs_empty": "ℹ️ Лог-файл пока пуст или не найден.",
+  "token_alert": "🔑 <b>Токен умер!</b>\n\nBearer-токен аккаунта <b>{alias}</b> больше невалиден — фарм на нём встал.\nВставьте свежий: <code>/settoken {alias} новый_токен</code>"
 }

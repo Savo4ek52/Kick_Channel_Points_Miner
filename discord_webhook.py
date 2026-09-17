@@ -354,6 +354,28 @@ class DiscordWebhook:
         payload = self._build_payload([embed])
         self._send_in_thread(payload)
 
+    def send_token_alert(self, account_alias: str):
+        """Алерт сторожа: Bearer-токен аккаунта умер"""
+        if not self.enabled or not self.notify_errors:
+            return
+
+        embed = self._embed(
+            title="🔑 Token Dead!",
+            description=(
+                f"Bearer token of **{account_alias}** is no longer "
+                f"valid — farming on it has stopped.\n"
+                f"Paste a fresh one via Telegram: "
+                f"`/settoken {account_alias} new_token`"
+            ),
+            color=self.color_error,
+            fields=[
+                self._field("Account", account_alias),
+            ],
+        )
+
+        payload = self._build_payload([embed])
+        self._send_in_thread(payload)
+
     def send_status_summary(
         self,
         accounts_status: List[dict],
