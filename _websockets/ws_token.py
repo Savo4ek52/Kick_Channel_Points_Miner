@@ -8,8 +8,45 @@ from localization import t
 
 
 class KickPoints:
+    @staticmethod
+    def _sanitize_token(token: str) -> str:
+        """Убирает мусор, который пользователи часто вставляют в config."""
+        cleaned = (token or "").strip().strip('"').strip("'").strip()
+        if cleaned.lower().startswith("bearer "):
+            logger.warning(t("token_bearer_prefix"))
+            cleaned = cleaned[7:].strip()
+        return cleaned
+
+    def _diagnose_ws_403(self):
+        """Анонимная проба: различаем 'протухший токен' и 'бан IP/CF'.
+
+        Если без Authorization endpoint отвечает 200, а с токеном — 403,
+        то виноват именно токен аккаунта, а не сеть/прокси/Cloudflare.
+        """
+        try:
+            saved_auth = self.session.headers.pop("Authorization", None)
+            try:
+                probe = self.session.get(
+                    "https://websockets.kick.com/viewer/v1/token",
+                    timeout=15,
+                )
+            finally:
+                if saved_auth:
+                    self.session.headers["Authorization"] = saved_auth
+
+            if probe.status_code == 200:
+                logger.error(t("ws_token_403_is_token"))
+            elif probe.status_code == 403:
+                logger.error(t("ws_token_403_is_ip"))
+            else:
+                logger.warning(
+                    f"Анонимная проба viewer/token: {probe.status_code}"
+                )
+        except Exception as e:
+            logger.debug(f"Диагностика 403 не удалась: {e}")
+
     def __init__(self, token: str, proxy: str = None):
-        self.token = token
+        self.token = self._sanitize_token(token)
         self.proxy = proxy
 
         proxies = None
@@ -236,9 +273,18 @@ class KickPoints:
             ))
 
             if ws_status == 403:
-                logger.error(
-                    f"403 при WS-токене для {streamer_name}"
-                )
+                try:
+                    body = ws_response.content.decode(
+                        "utf-8", errors="ignore"
+                    )[:150]
+                except Exception:
+                    body = ""
+                logger.error(t(
+                    "ws_token_403_invalid",
+                    streamer=streamer_name,
+                    body=body,
+                ))
+                self._diagnose_ws_403()
                 return None
 
             if ws_status != 200:

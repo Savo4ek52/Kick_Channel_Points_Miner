@@ -158,5 +158,9 @@
   "discord_message_sent": "🟣 Discord message sent successfully",
   "discord_rate_limited": "⚠️ Discord rate limited — retrying in {retry_after}s",
   "discord_send_failed": "❌ Discord webhook send failed: HTTP {status}",
-  "discord_send_error": "❌ Discord webhook error: {error}"
+  "discord_send_error": "❌ Discord webhook error: {error}",
+  "token_bearer_prefix": "⚠️ Token contains a redundant 'Bearer ' prefix — removed automatically. Fix config.json (only the token itself is needed)",
+  "ws_token_403_invalid": "❌ 403 on WS token for {streamer} — Kick rejected the Bearer token (expired/mis-copied). API response: {body}",
+  "ws_token_403_is_token": "❌ Diagnosis: anonymous viewer/token request returns 200, but with your token — 403. Conclusion: the token is INVALID. Grab a fresh Bearer token (F12 → Network → authorization) and replace it in config.json",
+  "ws_token_403_is_ip": "❌ Diagnosis: even the anonymous viewer/token request returns 403. Conclusion: IP/Cloudflare is blocked — you need a proxy/VPN, the token is not the problem"
 }

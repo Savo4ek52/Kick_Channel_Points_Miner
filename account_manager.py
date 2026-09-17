@@ -63,7 +63,8 @@ class AccountWorker:
         stagger_max: float = 8.0,
     ):
         self.alias = account_cfg["alias"]
-        self.token = account_cfg["token"]
+        self.token = self._clean_token(account_cfg.get("token", ""))
+        self.paused = bool(account_cfg.get("disabled", False))
         self.proxy = account_cfg.get("proxy") or global_proxy
         self.max_concurrent = account_cfg.get("max_concurrent", 2)
         self.check_interval = check_interval
@@ -92,6 +93,29 @@ class AccountWorker:
 
         self._rebalance_lock = asyncio.Lock()
         self._running = False
+
+    @staticmethod
+    def _clean_token(token: str) -> str:
+        """Чистит типовой мусор в токене из config.json.
+
+        Самая частая причина '403 при WS-токене' — токен вставлен
+        вместе со словом 'Bearer', с пробелами или кавычками.
+        """
+        cleaned = (token or "").strip().strip('"').strip("'").strip()
+        if cleaned.lower().startswith("bearer "):
+            logger.warning(
+                "⚠️ В токене найден лишний префикс 'Bearer ' — "
+                "убран автоматически. Исправьте config.json "
+                "(нужен только сам токен, без слова Bearer)"
+            )
+            cleaned = cleaned[7:].strip()
+        if cleaned and "|" not in cleaned:
+            logger.warning(
+                "⚠️ Токен не похож на валидный "
+                "(нет символа '|', вид должен быть 12345678|xxxx...). "
+                "Проверьте: python check_kick_token.py"
+            )
+        return cleaned
 
     def set_discord(self, discord: "DiscordWebhook"):
         self._discord = discord
@@ -125,8 +149,14 @@ class AccountWorker:
         )
 
         try:
-            await self._check_all_online()
-            await self._rebalance()
+            if self.paused:
+                logger.info(
+                    f"[{self.alias}] ⏸ Пауза (disabled) — "
+                    f"проверки пропущены, снимите паузой /resume"
+                )
+            else:
+                await self._check_all_online()
+                await self._rebalance()
 
             while self._running:
                 jitter = random.uniform(
@@ -134,6 +164,8 @@ class AccountWorker:
                     self.check_interval * 1.2,
                 )
                 await asyncio.sleep(jitter)
+                if self.paused:
+                    continue
                 await self._check_all_online()
                 await self._rebalance()
 
@@ -277,7 +309,10 @@ class AccountWorker:
             ws_token = ws_token_getter.get_ws_token(name)
             if not ws_token:
                 raise RuntimeError(
-                    f"Не удалось получить WS-токен для {name}"
+                    f"Не удалось получить WS-токен для {name} — "
+                    f"скорее всего протух/неверен Bearer-токен "
+                    f"аккаунта [{self.alias}]. "
+                    f"Проверьте: python check_kick_token.py"
                 )
 
             async def on_disconnect():
@@ -408,6 +443,106 @@ class AccountWorker:
                     f"{name}: {e}"
                 )
 
+    # ---------- Live-управление (Telegram) ----------
+
+    async def pause(self):
+        """Остановить фарм, но оставить воркер живым."""
+        self.paused = True
+        for name, s in list(self.state.streamers.items()):
+            if s.is_watching:
+                await self._stop_streamer(name)
+        logger.info(f"[{self.alias}] ⏸ Пауза включена")
+
+    async def resume(self):
+        """Снять паузу и сразу перепроверить онлайны."""
+        self.paused = False
+        logger.info(f"[{self.alias}] ▶ Пауза снята")
+        await self._check_all_online()
+        await self._rebalance()
+
+    async def add_streamer(self, name: str) -> str:
+        """Добавить стримера на лету. Возвращает статус-строку."""
+        name = (name or "").strip().lstrip("@")
+        if not name:
+            return "empty"
+        if name in self.state.streamers:
+            return "exists"
+        prio = len(self.state.streamer_order)
+        self.state.streamers[name] = StreamerState(
+            name=name, priority=prio
+        )
+        self.state.streamer_order.append(name)
+        try:
+            utility = self._get_utility(name)
+            stream_id = await asyncio.to_thread(
+                utility.get_stream_id, self.token
+            )
+            st = self.state.streamers[name]
+            st.is_online = stream_id is not None
+            st.stream_id = stream_id
+        except Exception as e:
+            logger.warning(f"[{self.alias}] check {name}: {e}")
+        await self._rebalance()
+        return "added"
+
+    async def remove_streamer(self, name: str) -> str:
+        """Убрать стримера на лету. Возвращает статус-строку."""
+        name = (name or "").strip().lstrip("@")
+        if name not in self.state.streamers:
+            return "missing"
+        if self.state.streamers[name].is_watching:
+            await self._stop_streamer(name)
+        del self.state.streamers[name]
+        self.state.streamer_order = [
+            s for s in self.state.streamer_order if s != name
+        ]
+        for i, s in enumerate(self.state.streamer_order):
+            self.state.streamers[s].priority = i
+        util = self._utility_cache.pop(name, None)
+        if util:
+            try:
+                util.close()
+            except Exception:
+                pass
+        await self._rebalance()
+        return "removed"
+
+    async def set_max_concurrent(self, n: int) -> int:
+        self.max_concurrent = max(1, min(int(n), 10))
+        self.state.max_concurrent = self.max_concurrent
+        await self._rebalance()
+        return self.max_concurrent
+
+    def set_token(self, new_token: str) -> str:
+        """Заменить Bearer-токен и сбросить сессии.
+
+        Активные WS-подключения продолжают работу на старом
+        viewer-токене до переподключения; новый Bearer сразу
+        используется для проверок онлайна/баланса/новых подключений.
+        """
+        self.token = self._clean_token(new_token)
+        self.state.token = self.token
+        if self._ws_token_getter:
+            try:
+                self._ws_token_getter.close()
+            except Exception:
+                pass
+            self._ws_token_getter = None
+        if self._points_checker:
+            try:
+                self._points_checker.close()
+            except Exception:
+                pass
+            self._points_checker = None
+        for u in self._utility_cache.values():
+            try:
+                u.close()
+            except Exception:
+                pass
+        self._utility_cache.clear()
+        logger.info(f"[{self.alias}] 🔑 Токен обновлён")
+        return self.token
+
     async def stop(self):
         self._running = False
 
@@ -433,6 +568,7 @@ class AccountWorker:
         return {
             "alias": self.alias,
             "proxy": bool(self.proxy),
+            "paused": self.paused,
             "max_concurrent": self.max_concurrent,
             "active_count": self.state.active_count,
             "active_streamers": self.state.active_names,
@@ -450,6 +586,7 @@ class AccountWorker:
                     ),
                     "stream_id": s.stream_id,
                     "errors": s.error_count,
+                    "last_error": s.last_error or "",
                 }
                 for name, s in self.state.streamers.items()
             },
@@ -545,6 +682,24 @@ class AccountManager:
             task.cancel()
         for w in self.workers:
             await w.stop()
+
+    def find_worker(self, ident: str) -> Optional[AccountWorker]:
+        """Найти воркер по alias (без учёта регистра) или номеру с 1."""
+        ident = (ident or "").strip()
+        if not ident:
+            return None
+        if ident.startswith("#"):
+            ident = ident[1:]
+        if ident.isdigit():
+            i = int(ident) - 1
+            if 0 <= i < len(self.workers):
+                return self.workers[i]
+            return None
+        low = ident.lower()
+        for w in self.workers:
+            if w.alias.lower() == low:
+                return w
+        return None
 
     def get_all_status(self) -> List[dict]:
         return [w.get_status() for w in self.workers]

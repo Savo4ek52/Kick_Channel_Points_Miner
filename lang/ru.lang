@@ -158,5 +158,9 @@
   "discord_message_sent": "🟣 Discord сообщение отправлено",
   "discord_rate_limited": "⚠️ Discord rate limit — повтор через {retry_after}с",
   "discord_send_failed": "❌ Ошибка отправки Discord webhook: HTTP {status}",
-  "discord_send_error": "❌ Ошибка Discord webhook: {error}"
+  "discord_send_error": "❌ Ошибка Discord webhook: {error}",
+  "token_bearer_prefix": "⚠️ В токене найден лишний префикс 'Bearer ' — убран автоматически. Исправьте значение в config.json (нужен только сам токен)",
+  "ws_token_403_invalid": "❌ 403 при WS-токене для {streamer} — Kick отклонил Bearer-токен (протух/неверно скопирован). Ответ API: {body}",
+  "ws_token_403_is_token": "❌ Диагностика: анонимный запрос к viewer/token проходит (200), а с вашим токеном — 403. Вывод: токен НЕВАЛИДЕН. Получите свежий Bearer-токен (F12 → Network → authorization) и замените в config.json",
+  "ws_token_403_is_ip": "❌ Диагностика: даже анонимный запрос к viewer/token даёт 403. Вывод: заблокирован IP/Cloudflare — нужен прокси/VPN, токен тут ни при чём"
 }

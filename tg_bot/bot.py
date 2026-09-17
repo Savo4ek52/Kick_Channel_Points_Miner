@@ -1,10 +1,11 @@
 import os
 import json
 import asyncio
+import re
 import sys
 import html
 from datetime import datetime
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, Tuple
 
 from telegram.ext import (
     Application,
@@ -37,6 +38,7 @@ class TelegramBot:
         self.user_language: dict[int, str] = {}
         self.language_files: dict[str, dict] = {}
         self.config = config
+        self.config_path = "config.json"
         self.account_manager: Optional["AccountManager"] = None
 
         # Обратная совместимость
@@ -91,6 +93,15 @@ class TelegramBot:
                 CommandHandler("status", self.cmd_status),
                 CommandHandler("balance", self.cmd_balance),
                 CommandHandler("accounts", self.cmd_accounts),
+                CommandHandler("account", self.cmd_account),
+                CommandHandler("errors", self.cmd_errors),
+                CommandHandler("addstreamer", self.cmd_addstreamer),
+                CommandHandler("delstreamer", self.cmd_delstreamer),
+                CommandHandler("setlimit", self.cmd_setlimit),
+                CommandHandler("settoken", self.cmd_settoken),
+                CommandHandler("pause", self.cmd_pause),
+                CommandHandler("resume", self.cmd_resume),
+                CommandHandler("checktokens", self.cmd_checktokens),
                 CommandHandler("restart", self.cmd_restart),
                 CommandHandler("help", self.cmd_help),
                 CommandHandler("language", self.cmd_language),
@@ -193,6 +204,141 @@ class TelegramBot:
     def is_admin(self, user_id: int) -> bool:
         owner = self.config.get("Telegram", {}).get("chat_id")
         return str(user_id) == str(owner)
+
+    # ---------- Управление аккаунтами ----------
+
+    async def _admin_guard(self, update: Update) -> Optional[Tuple[int, str]]:
+        """Проверка прав админа. Возвращает (uid, lang) или None."""
+        uid = update.effective_user.id
+        if not self.is_user_allowed(uid):
+            return None
+        lang = self._lang(uid)
+        if not self.is_admin(uid):
+            await update.message.reply_text(
+                self.get_text("not_enough_permissions", lang),
+                parse_mode=ParseMode.HTML,
+            )
+            return None
+        if not self.account_manager:
+            await update.message.reply_text("No AccountManager")
+            return None
+        return uid, lang
+
+    def _resolve_worker(self, args, trailing: int = 0):
+        """Найти воркер по alias (может содержать пробелы) или номеру.
+
+        trailing — сколько последних аргументов НЕ входят в alias
+        (например, имя стримера или число лимита).
+        Возвращает (worker|None, остаток_аргументов).
+        """
+        if not args or len(args) <= trailing or not self.account_manager:
+            return None, []
+        if trailing:
+            alias = " ".join(args[:-trailing])
+            rest = list(args[-trailing:])
+        else:
+            alias = " ".join(args)
+            rest = []
+        return self.account_manager.find_worker(alias), rest
+
+    def _available_aliases(self) -> str:
+        if not self.account_manager:
+            return "—"
+        return ", ".join(
+            f"#{i + 1} {w.alias}"
+            for i, w in enumerate(self.account_manager.workers)
+        )
+
+    @staticmethod
+    def _mask_token(token: str) -> str:
+        t = (token or "").strip()
+        if len(t) <= 10:
+            return "***"
+        return f"{t[:4]}...{t[-4:]}"
+
+    def _sync_workers_to_config(self):
+        """Перенести живое состояние воркеров в self.config."""
+        accounts = self.config.get("Accounts")
+        if not accounts or not self.account_manager:
+            return
+        by_alias = {a.get("alias"): a for a in accounts}
+        for w in self.account_manager.workers:
+            entry = by_alias.get(w.alias)
+            if entry is None:
+                continue
+            entry["streamers"] = list(w.state.streamer_order)
+            entry["max_concurrent"] = w.max_concurrent
+            entry["token"] = w.token
+            if w.paused:
+                entry["disabled"] = True
+            else:
+                entry.pop("disabled", None)
+
+    def _save_config(self) -> Optional[str]:
+        """Сохранить config.json. Возвращает None или текст ошибки."""
+        try:
+            self._sync_workers_to_config()
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                json.dump(self.config, f, ensure_ascii=False, indent=2)
+            return None
+        except Exception as e:
+            logger.error(f"TG: не удалось сохранить config: {e}")
+            return str(e)
+
+    @staticmethod
+    def _validate_kick_token(token: str) -> Tuple[bool, str]:
+        """Проверить Bearer-токен через приватный endpoint Kick.
+
+        Возвращает (valid, info): info = 'ok' | 'invalid' | 'error ...'.
+        Синхронная — вызывать через asyncio.to_thread.
+        """
+        try:
+            from curl_cffi import requests as cffi_requests
+        except ImportError:
+            return False, "error: curl_cffi not installed"
+        t = (token or "").strip().strip('"').strip("'").strip()
+        if t.lower().startswith("bearer "):
+            t = t[7:].strip()
+        if not t:
+            return False, "error: empty token"
+        s = cffi_requests.Session(impersonate="chrome120")
+        try:
+            s.headers.update({
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "application/json, text/plain, */*",
+                "Origin": "https://kick.com",
+                "Referer": "https://kick.com/",
+                "X-Client-Token": (
+                    "e1393935a959b4020a4491574f6490129f678acda"
+                    "aa92760471263db43487f823"
+                ),
+            })
+            s.get("https://kick.com", timeout=15)
+            r = s.get(
+                "https://websockets.kick.com/viewer/v1/token",
+                headers={"Authorization": f"Bearer {t}"},
+                timeout=15,
+            )
+            if r.status_code == 200:
+                return True, "ok"
+            if r.status_code == 403:
+                return False, "invalid"
+            return False, f"error: HTTP {r.status_code}"
+        except Exception as e:
+            return False, f"error: {e}"
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _valid_streamer_name(name: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z0-9_]{1,25}", name or ""))
 
     def _build_status_text(self, lang: str) -> str:
         if self.account_manager:
@@ -311,11 +457,13 @@ class TelegramBot:
         text = "\n\n".join(msgs)
         return text[:4000] if len(text) <= 4000 else text[:4000] + "..."
 
-    def _build_accounts_text(self) -> str:
+    def _build_accounts_text(self, lang: str = "en") -> str:
         if not self.account_manager:
             return "No AccountManager"
 
-        lines = ["<b>👥 Accounts Overview</b>\n"]
+        lines = [
+            f"<b>{html.escape(self.get_text('ov_title', lang))}</b>\n"
+        ]
 
         for i, worker in enumerate(
             self.account_manager.workers
@@ -323,6 +471,10 @@ class TelegramBot:
             st = worker.get_status()
             alias = html.escape(st["alias"])
             proxy = "🔒 proxy" if st["proxy"] else "🌐 direct"
+            paused = (
+                f" {self.get_text('ov_paused', lang)}"
+                if st.get("paused") else ""
+            )
             active = st["active_count"]
             limit = st["max_concurrent"]
             total = len(st["streamers"])
@@ -331,16 +483,66 @@ class TelegramBot:
                 if s.get("online")
             )
 
-            order = " > ".join(worker.state.streamer_order)
+            order = " > ".join(
+                html.escape(s) for s in worker.state.streamer_order
+            ) or "—"
 
             lines.append(
-                f"<b>#{i + 1} {alias}</b>\n"
+                f"<b>#{i + 1} {alias}</b>{paused}\n"
                 f"  {proxy}\n"
-                f"  Стримеров: {total} (онлайн: {online})\n"
-                f"  Активно: {active}/{limit}\n"
-                f"  Приоритет: {order}\n"
+                f"  {self.get_text('ov_streamers', lang)}: "
+                f"{total} ({self.get_text('ov_online', lang)}: "
+                f"{online})\n"
+                f"  {self.get_text('ov_active', lang)}: "
+                f"{active}/{limit}\n"
+                f"  {self.get_text('ov_priority', lang)}: "
+                f"{order}\n"
             )
 
+        return "\n".join(lines)
+
+    def _build_account_card(self, worker, num: int, lang: str) -> str:
+        st = worker.get_status()
+        alias = html.escape(st["alias"])
+        proxy = "🔒 proxy" if st["proxy"] else "🌐 direct"
+        state = (
+            self.get_text("ov_paused", lang)
+            if st.get("paused")
+            else self.get_text("ov_running", lang)
+        )
+        token_ok = (
+            "✅"
+            if worker.token and "|" in worker.token
+            else "⚠️"
+        )
+        lines = [
+            f"<b>👤 #{num} {alias}</b> — {state}",
+            f"  {proxy} | {self.get_text('ov_active', lang)}: "
+            f"{st['active_count']}/{st['max_concurrent']}",
+            f"  🔑 <code>{self._mask_token(worker.token)}</code> "
+            f"{token_ok}",
+            "",
+        ]
+        if not worker.state.streamer_order:
+            lines.append(self.get_text("card_empty", lang))
+        for name in worker.state.streamer_order:
+            info = st["streamers"].get(name, {})
+            pri = info.get("priority", "?")
+            watching = info.get("watching", False)
+            online = info.get("online", False)
+            pts = info.get("points", 0)
+            errors = info.get("errors", 0)
+            icon = "👁" if watching else ("🟢" if online else "⚫")
+            err = f" ⚠️x{errors}" if errors else ""
+            lines.append(
+                f"  {icon} #{pri} <code>{html.escape(name)}</code>"
+                f" — {pts} pts{err}"
+            )
+            last_err = info.get("last_error", "")
+            if last_err:
+                lines.append(
+                    f"      └ <code>{html.escape(last_err[:120])}</code>"
+                )
         return "\n".join(lines)
 
     async def cmd_start(self, update: Update, context):
@@ -387,9 +589,375 @@ class TelegramBot:
         if not self.is_user_allowed(uid):
             return
         await update.message.reply_text(
-            self._build_accounts_text(),
+            self._build_accounts_text(self._lang(uid)),
             parse_mode=ParseMode.HTML,
         )
+
+    async def cmd_account(self, update: Update, context):
+        uid = update.effective_user.id
+        if not self.is_user_allowed(uid) or not self.account_manager:
+            return
+        lang = self._lang(uid)
+        worker, _ = self._resolve_worker(context.args or [])
+        if not worker:
+            await update.message.reply_text(
+                self.get_text(
+                    "account_not_found", lang,
+                    ident=html.escape(
+                        " ".join(context.args or [])
+                    ),
+                    available=html.escape(
+                        self._available_aliases()
+                    ),
+                )
+                + "\n\n"
+                + self.get_text(
+                    "usage", lang,
+                    cmd="/account &lt;alias|номер&gt;",
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        num = self.account_manager.workers.index(worker) + 1
+        await update.message.reply_text(
+            self._build_account_card(worker, num, lang),
+            parse_mode=ParseMode.HTML,
+        )
+
+    async def cmd_errors(self, update: Update, context):
+        uid = update.effective_user.id
+        if not self.is_user_allowed(uid) or not self.account_manager:
+            return
+        lang = self._lang(uid)
+        lines = []
+        for worker in self.account_manager.workers:
+            st = worker.get_status()
+            bad = [
+                (name, info)
+                for name, info in st["streamers"].items()
+                if info.get("errors")
+            ]
+            if not bad:
+                continue
+            lines.append(f"<b>{html.escape(st['alias'])}</b>:")
+            for name, info in bad:
+                lines.append(
+                    f"  ⚠️ <code>{html.escape(name)}</code> "
+                    f"x{info['errors']}"
+                )
+                if info.get("last_error"):
+                    lines.append(
+                        f"      └ <code>"
+                        f"{html.escape(info['last_error'][:150])}"
+                        f"</code>"
+                    )
+        text = (
+            "\n".join(lines)
+            if lines else self.get_text("no_errors", lang)
+        )
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.HTML
+        )
+
+    async def cmd_addstreamer(self, update: Update, context):
+        guard = await self._admin_guard(update)
+        if not guard:
+            return
+        _, lang = guard
+        worker, rest = self._resolve_worker(
+            context.args or [], trailing=1
+        )
+        if not worker or not rest:
+            await update.message.reply_text(
+                self.get_text(
+                    "usage", lang,
+                    cmd="/addstreamer &lt;alias|номер&gt; &lt;streamer&gt;",
+                )
+                + "\n"
+                + html.escape(self._available_aliases()),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        name = rest[0].strip().lstrip("@")
+        if not self._valid_streamer_name(name):
+            await update.message.reply_text(
+                self.get_text(
+                    "bad_streamer_name", lang, streamer=html.escape(name)
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        result = await worker.add_streamer(name)
+        if result == "exists":
+            await update.message.reply_text(
+                self.get_text(
+                    "streamer_exists", lang,
+                    streamer=html.escape(name),
+                    alias=html.escape(worker.alias),
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        err = self._save_config()
+        st = worker.state.streamers[name]
+        text = self.get_text(
+            "streamer_added", lang,
+            streamer=html.escape(name),
+            alias=html.escape(worker.alias),
+            prio=st.priority,
+            online="🟢" if st.is_online else "⚫",
+        )
+        if err:
+            text += "\n" + self.get_text(
+                "cfg_save_failed", lang,
+                error=html.escape(err),
+            )
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.HTML
+        )
+
+    async def cmd_delstreamer(self, update: Update, context):
+        guard = await self._admin_guard(update)
+        if not guard:
+            return
+        _, lang = guard
+        worker, rest = self._resolve_worker(
+            context.args or [], trailing=1
+        )
+        if not worker or not rest:
+            await update.message.reply_text(
+                self.get_text(
+                    "usage", lang,
+                    cmd="/delstreamer &lt;alias|номер&gt; &lt;streamer&gt;",
+                )
+                + "\n"
+                + html.escape(self._available_aliases()),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        name = rest[0].strip().lstrip("@")
+        result = await worker.remove_streamer(name)
+        if result == "missing":
+            await update.message.reply_text(
+                self.get_text(
+                    "streamer_missing", lang,
+                    streamer=html.escape(name),
+                    alias=html.escape(worker.alias),
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        err = self._save_config()
+        text = self.get_text(
+            "streamer_removed", lang,
+            streamer=html.escape(name),
+            alias=html.escape(worker.alias),
+        )
+        if err:
+            text += "\n" + self.get_text(
+                "cfg_save_failed", lang,
+                error=html.escape(err),
+            )
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.HTML
+        )
+
+    async def cmd_setlimit(self, update: Update, context):
+        guard = await self._admin_guard(update)
+        if not guard:
+            return
+        _, lang = guard
+        worker, rest = self._resolve_worker(
+            context.args or [], trailing=1
+        )
+        if not worker or not rest or not rest[0].isdigit():
+            await update.message.reply_text(
+                self.get_text(
+                    "usage", lang,
+                    cmd="/setlimit &lt;alias|номер&gt; &lt;1-10&gt;",
+                )
+                + "\n"
+                + html.escape(self._available_aliases()),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        n = max(1, min(int(rest[0]), 10))
+        await worker.set_max_concurrent(n)
+        err = self._save_config()
+        text = self.get_text(
+            "limit_set", lang,
+            alias=html.escape(worker.alias), n=n,
+        )
+        if err:
+            text += "\n" + self.get_text(
+                "cfg_save_failed", lang,
+                error=html.escape(err),
+            )
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.HTML
+        )
+
+    async def cmd_settoken(self, update: Update, context):
+        guard = await self._admin_guard(update)
+        if not guard:
+            return
+        _, lang = guard
+        worker, rest = self._resolve_worker(
+            context.args or [], trailing=1
+        )
+        if not worker or not rest:
+            await update.message.reply_text(
+                self.get_text(
+                    "usage", lang,
+                    cmd="/settoken &lt;alias|номер&gt; &lt;токен_без_Bearer&gt;",
+                )
+                + "\n"
+                + html.escape(self._available_aliases()),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        new_token = rest[0].strip()
+        wait_msg = await update.message.reply_text(
+            self.get_text("token_checking", lang),
+            parse_mode=ParseMode.HTML,
+        )
+        valid, info = await asyncio.to_thread(
+            self._validate_kick_token, new_token
+        )
+        worker.set_token(new_token)
+        err = self._save_config()
+        if valid:
+            check = self.get_text("token_check_ok", lang)
+        elif info == "invalid":
+            check = self.get_text("token_check_bad", lang)
+        else:
+            check = self.get_text(
+                "token_check_err", lang,
+                info=html.escape(info),
+            )
+        text = self.get_text(
+            "token_updated", lang,
+            alias=html.escape(worker.alias),
+            mask=self._mask_token(worker.token),
+            check=check,
+        )
+        if err:
+            text += "\n" + self.get_text(
+                "cfg_save_failed", lang,
+                error=html.escape(err),
+            )
+        try:
+            await wait_msg.edit_text(
+                text, parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            await update.message.reply_text(
+                text, parse_mode=ParseMode.HTML
+            )
+
+    async def cmd_pause(self, update: Update, context):
+        guard = await self._admin_guard(update)
+        if not guard:
+            return
+        _, lang = guard
+        worker, _ = self._resolve_worker(context.args or [])
+        if not worker:
+            await update.message.reply_text(
+                self.get_text(
+                    "usage", lang,
+                    cmd="/pause &lt;alias|номер&gt;",
+                )
+                + "\n"
+                + html.escape(self._available_aliases()),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        await worker.pause()
+        err = self._save_config()
+        text = self.get_text(
+            "paused", lang, alias=html.escape(worker.alias)
+        )
+        if err:
+            text += "\n" + self.get_text(
+                "cfg_save_failed", lang,
+                error=html.escape(err),
+            )
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.HTML
+        )
+
+    async def cmd_resume(self, update: Update, context):
+        guard = await self._admin_guard(update)
+        if not guard:
+            return
+        _, lang = guard
+        worker, _ = self._resolve_worker(context.args or [])
+        if not worker:
+            await update.message.reply_text(
+                self.get_text(
+                    "usage", lang,
+                    cmd="/resume &lt;alias|номер&gt;",
+                )
+                + "\n"
+                + html.escape(self._available_aliases()),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        await worker.resume()
+        err = self._save_config()
+        text = self.get_text(
+            "resumed", lang, alias=html.escape(worker.alias)
+        )
+        if err:
+            text += "\n" + self.get_text(
+                "cfg_save_failed", lang,
+                error=html.escape(err),
+            )
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.HTML
+        )
+
+    async def cmd_checktokens(self, update: Update, context):
+        guard = await self._admin_guard(update)
+        if not guard:
+            return
+        _, lang = guard
+        wait_msg = await update.message.reply_text(
+            self.get_text("token_checking", lang),
+            parse_mode=ParseMode.HTML,
+        )
+        lines = [f"<b>{html.escape(self.get_text('tokens_title', lang))}</b>\n"]
+        for worker in self.account_manager.workers:
+            valid, info = await asyncio.to_thread(
+                self._validate_kick_token, worker.token
+            )
+            if valid:
+                mark = self.get_text("token_check_ok", lang)
+            elif info == "invalid":
+                mark = self.get_text("token_check_bad", lang)
+            else:
+                mark = self.get_text(
+                    "token_check_err", lang,
+                    info=html.escape(info),
+                )
+            lines.append(
+                f"👤 <b>{html.escape(worker.alias)}</b> "
+                f"<code>{self._mask_token(worker.token)}</code>\n"
+                f"   └ {mark}"
+            )
+        text = "\n".join(lines)
+        try:
+            await wait_msg.edit_text(
+                text, parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            await update.message.reply_text(
+                text, parse_mode=ParseMode.HTML
+            )
 
     async def cmd_restart(self, update: Update, context):
         uid = update.effective_user.id
@@ -417,14 +985,12 @@ class TelegramBot:
         if not self.is_user_allowed(uid):
             return
         lang = self._lang(uid)
-        extra = (
-            "\n\n<b>Multi-account commands:</b>\n"
-            "/accounts — Accounts overview\n"
-            "/status — Status with priorities\n"
-            "/balance — Points by account"
+        key = (
+            "help_full_admin" if self.is_admin(uid)
+            else "help_full"
         )
         await update.message.reply_text(
-            self.get_text("help_message", lang) + extra,
+            self.get_text(key, lang),
             parse_mode=ParseMode.HTML,
         )
 
@@ -493,7 +1059,11 @@ class TelegramBot:
 
         if self.account_manager:
             text = "🚀 <b>Miner Started!</b>\n\n"
-            text += self._build_accounts_text()
+            try:
+                lang = self._lang(int(owner))
+            except (TypeError, ValueError):
+                lang = self.config.get("Language", "en")
+            text += self._build_accounts_text(lang)
         else:
             sl = "\n".join([
                 f"• <code>{html.escape(str(s))}</code>"

@@ -41,7 +41,8 @@
       "token": "YOUR_KICK_TOKEN_1",
       "proxy": null,
       "streamers": ["streamer1", "streamer2", "streamer3"],
-      "max_concurrent": 2
+      "max_concurrent": 2,
+      "disabled": false
     },
     {
       "alias": "Second Account",
